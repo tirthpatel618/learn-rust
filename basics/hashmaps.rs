@@ -63,5 +63,5 @@ fn main() {
         let status = if todo.completed { "done" } else { "open" };
         println!("{}: {} [{}]", id, todo.title, status);
     }
-
+ 
 }
