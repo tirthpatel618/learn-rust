@@ -152,7 +152,7 @@ fn add_todo(todos: &mut Vec<Todo>, title: String) {
     });
 
     println!("Added todo {}", next_id);
-}
+} 
 
 fn list_todos(todos: &[Todo]) {
     if todos.is_empty() {
