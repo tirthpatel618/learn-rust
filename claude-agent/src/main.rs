@@ -1,3 +1,6 @@
+mod flow;
+
+use flow::{read_flow, run_flow};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -7,20 +10,20 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 
 #[derive(Debug, Clone)]
-struct Agent {
+pub(crate) struct Agent {
     name: String,
     system_prompt: String,
 }
 
 #[derive(Debug, Clone)]
-enum Provider {
+pub(crate) enum Provider {
     Fake,
     Anthropic,
     OpenAi,
 }
 
 #[derive(Debug)]
-enum AgentEvent {
+pub(crate) enum AgentEvent {
     Started { agent: String, provider: String },
     Token { agent: String, text: String },
     Completed { agent: String, output: String },
@@ -82,7 +85,11 @@ struct OpenAiResponseMessage {
 
 #[tokio::main]
 async fn main() {
-    let provider = read_provider();
+    load_env();
+
+    let args: Vec<String> = env::args().collect();
+    let provider = read_provider(&args);
+    let flow = read_flow(&args);
     let client = Client::new();
 
     let researcher = Agent {
@@ -100,32 +107,9 @@ async fn main() {
 
     let (tx, mut rx) = mpsc::channel::<AgentEvent>(64);
 
-    let researcher_provider = provider.clone();
-    let researcher_client = client.clone();
-    let researcher_tx = tx.clone();
-    let researcher_handle = tokio::spawn(async move {
-        run_agent(
-            researcher,
-            "Explore why Rust is a strong fit for AI-agent orchestration runtimes. Keep it concise.",
-            researcher_provider,
-            researcher_client,
-            researcher_tx,
-        )
-        .await;
-    });
-
-    let writer_provider = provider.clone();
-    let writer_client = client.clone();
-    let writer_tx = tx.clone();
-    let writer_handle = tokio::spawn(async move {
-        run_agent(
-            writer,
-            "Write an academic-style paragraph explaining the value of a Rust runtime for agent DAG execution.",
-            writer_provider,
-            writer_client,
-            writer_tx,
-        )
-        .await;
+    let flow_tx = tx.clone();
+    let flow_handle = tokio::spawn(async move {
+        run_flow(flow, provider, client, researcher, writer, flow_tx).await;
     });
 
     drop(tx);
@@ -147,15 +131,20 @@ async fn main() {
         }
     }
 
-    for handle in [researcher_handle, writer_handle] {
-        if let Err(error) = handle.await {
-            println!("agent task failed: {}", error);
-        }
+    if let Err(error) = flow_handle.await {
+        println!("flow task failed: {}", error);
     }
 }
 
-fn read_provider() -> Provider {
-    let args: Vec<String> = env::args().collect();
+fn load_env() {
+    if dotenvy::dotenv().is_ok() {
+        return;
+    }
+
+    dotenvy::from_filename("src/.env").ok();
+}
+
+fn read_provider(args: &[String]) -> Provider {
     let provider_arg = args
         .windows(2)
         .find(|pair| pair[0] == "--provider")
@@ -169,13 +158,13 @@ fn read_provider() -> Provider {
     }
 }
 
-async fn run_agent(
+pub(crate) async fn run_agent(
     agent: Agent,
     input: &str,
     provider: Provider,
     client: Client,
     tx: mpsc::Sender<AgentEvent>,
-) {
+) -> Option<String> {
     let provider_name = provider_name(&provider).to_string();
     let _ = tx
         .send(AgentEvent::Started {
@@ -191,7 +180,10 @@ async fn run_agent(
     };
 
     match output {
-        Ok(output) => stream_completed_output(agent.name, output, tx).await,
+        Ok(output) => {
+            stream_completed_output(agent.name, output.clone(), tx).await;
+            Some(output)
+        }
         Err(error) => {
             let _ = tx
                 .send(AgentEvent::Failed {
@@ -199,6 +191,7 @@ async fn run_agent(
                     error: error.to_string(),
                 })
                 .await;
+            None
         }
     }
 }
@@ -220,9 +213,9 @@ async fn call_anthropic(
     agent: &Agent,
     input: &str,
 ) -> Result<String, Box<dyn Error + Send + Sync>> {
-    let api_key = env::var("ANTHROPIC_API_KEY")?;
+    let api_key = env::var("ANTHROPIC_API_KEY").map_err(|_| "ANTHROPIC_API_KEY is not set")?;
     let model =
-        env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| String::from("claude-3-5-haiku-latest"));
+        env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| String::from("claude-3-5-haiku-20241022"));
 
     let request = AnthropicRequest {
         model,
@@ -266,7 +259,7 @@ async fn call_openai(
     agent: &Agent,
     input: &str,
 ) -> Result<String, Box<dyn Error + Send + Sync>> {
-    let api_key = env::var("OPENAI_API_KEY")?;
+    let api_key = env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY is not set")?;
     let model = env::var("OPENAI_MODEL").unwrap_or_else(|_| String::from("gpt-4o-mini"));
 
     let request = OpenAiRequest {
